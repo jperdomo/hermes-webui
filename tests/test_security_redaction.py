@@ -613,3 +613,37 @@ def test_fix_credential_permissions_skips_correct_files(tmp_path, monkeypatch):
     assert env_file.exists(), ".env missing after strict-permission check"
     if os.name != "nt":
         assert stat.S_IMODE(env_file.stat().st_mode) == 0o600
+
+
+_FAKE_JWT = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dQw4w9WgXcQabcdefghij"
+_FAKE_TG = "123456789:AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsawQ"
+
+
+@pytest.mark.parametrize("text,leaked,kept", [
+    (f"token {_FAKE_JWT} end", _FAKE_JWT, "[REDACTED JWT]"),
+    ("postgres://app:s3cretPassw0rd@db.example:5432/app", "s3cretPassw0rd", "postgres://app:"),
+    ("redis://default:hunter2hunter2@cache:6379", "hunter2hunter2", "@cache:6379"),
+    (f"bot {_FAKE_TG}", "AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsawQ", "123456789:"),
+])
+def test_fallback_masks_prefixless_secret_shapes(monkeypatch, text, leaked, kept):
+    """Without hermes-agent, the fallback still masks JWTs, URI userinfo and Telegram tokens."""
+    helpers = _reload_helpers_with_fallback_redactor(monkeypatch)
+    try:
+        redacted = helpers._redact_value(text)
+        assert leaked not in redacted
+        assert kept in redacted
+    finally:
+        importlib.reload(helpers)
+
+
+@pytest.mark.parametrize("text", [
+    "see https://example.com/path:8080/x for docs",
+    "ratio 12345:678 and time 10:30:15",
+    "user@example.com wrote at 2026-01-01T10:00:00",
+])
+def test_fallback_prefixless_patterns_leave_benign_text(monkeypatch, text):
+    helpers = _reload_helpers_with_fallback_redactor(monkeypatch)
+    try:
+        assert helpers._redact_value(text) == text
+    finally:
+        importlib.reload(helpers)
