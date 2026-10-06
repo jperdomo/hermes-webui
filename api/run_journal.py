@@ -159,15 +159,45 @@ def _discard_cached_summary(path: Path) -> None:
         _SUMMARY_CACHE.pop(str(path), None)
 
 
+# Bounded-read caps for _read_jsonl. A run journal is normally small, but a
+# runaway writer can leave a multi-GB file, and _read_jsonl is the shared reader
+# behind every caller, including live HTTP route handlers. An unbounded
+# read_text().splitlines() on such a file is an OOM on the request path.
+#
+# When the file exceeds _READ_JSONL_MAX_BYTES only the TAIL is read: seqs are
+# monotonic and the terminal row is written last, so the tail is what
+# _next_seq (max seq) and the run summary (terminal state) need. The leading
+# partial line of the window is dropped and the truncation is reported in
+# ``malformed``. Single lines above _READ_JSONL_MAX_LINE_BYTES are skipped.
+_READ_JSONL_MAX_BYTES = 64 * 1024 * 1024
+_READ_JSONL_MAX_LINE_BYTES = 4 * 1024 * 1024
+
+
 def _read_jsonl(path: Path) -> tuple[list[dict], list[dict]]:
     events: list[dict] = []
     malformed: list[dict] = []
     try:
-        lines = path.read_text(encoding="utf-8").splitlines()
+        with path.open("rb") as fh:
+            size = os.fstat(fh.fileno()).st_size
+            truncated = size > _READ_JSONL_MAX_BYTES
+            if truncated:
+                fh.seek(size - _READ_JSONL_MAX_BYTES)
+            buf = fh.read(_READ_JSONL_MAX_BYTES)
     except FileNotFoundError:
         return events, malformed
-    for line_no, raw in enumerate(lines, start=1):
+    if truncated:
+        nl = buf.find(b"\n")
+        buf = buf[nl + 1:] if nl != -1 else b""
+        malformed.append({
+            "line": -1,
+            "raw": f"[read-cap: journal is {size} bytes; only the last {_READ_JSONL_MAX_BYTES} bytes were read]",
+        })
+    text = buf.decode("utf-8", "replace")
+    for line_no, raw in enumerate(text.splitlines(), start=1):
         if not raw.strip():
+            continue
+        if len(raw) > _READ_JSONL_MAX_LINE_BYTES:
+            malformed.append({"line": line_no, "raw": "[read-cap: oversized line skipped]"})
             continue
         try:
             parsed = json.loads(raw)

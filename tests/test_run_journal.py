@@ -326,3 +326,53 @@ def test_stale_interrupted_event_skips_terminal_journal(tmp_path, monkeypatch):
     monkeypatch.setattr("api.run_journal._default_session_dir", lambda: tmp_path)
 
     assert stale_interrupted_event("session_1", "run_1") is None
+
+
+def test_read_jsonl_over_cap_reads_tail_and_keeps_terminal(tmp_path, monkeypatch):
+    """An oversized journal is read from its tail: max seq and terminal survive."""
+    from api import run_journal
+
+    monkeypatch.setattr(run_journal, "_READ_JSONL_MAX_BYTES", 4096)
+    path = tmp_path / "run.jsonl"
+    rows = [{"seq": i, "event": "token", "data": {"text": "y" * 40}} for i in range(1, 400)]
+    rows.append({"seq": 400, "event": "done", "terminal": True, "terminal_state": "completed"})
+    path.write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
+    assert path.stat().st_size > 4096
+
+    events, malformed = run_journal._read_jsonl(path)
+
+    seqs = [e["seq"] for e in events]
+    assert seqs[-1] == 400
+    assert seqs == list(range(seqs[0], 401))  # contiguous, no partial first row
+    assert events[-1]["event"] == "done"
+    assert any("read-cap" in m["raw"] for m in malformed)
+    assert run_journal._next_seq(path) == 401
+
+
+def test_read_jsonl_skips_oversized_single_line(tmp_path, monkeypatch):
+    from api import run_journal
+
+    monkeypatch.setattr(run_journal, "_READ_JSONL_MAX_LINE_BYTES", 100)
+    path = tmp_path / "run.jsonl"
+    path.write_text(
+        json.dumps({"seq": 1, "event": "token", "data": {"text": "z" * 500}}) + "\n"
+        + json.dumps({"seq": 2, "event": "done"}) + "\n",
+        encoding="utf-8",
+    )
+
+    events, malformed = run_journal._read_jsonl(path)
+
+    assert [e["seq"] for e in events] == [2]
+    assert malformed == [{"line": 1, "raw": "[read-cap: oversized line skipped]"}]
+
+
+def test_read_jsonl_under_cap_is_unchanged(tmp_path):
+    from api import run_journal
+
+    path = tmp_path / "run.jsonl"
+    path.write_text('{"seq": 1}\nnot json\n\n{"seq": 2}\n', encoding="utf-8")
+
+    events, malformed = run_journal._read_jsonl(path)
+
+    assert [e["seq"] for e in events] == [1, 2]
+    assert malformed == [{"line": 2, "raw": "not json"}]
