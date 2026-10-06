@@ -656,6 +656,7 @@ def main() -> None:
     except Exception as e:
         print(f'[!!] WARNING: Gateway watcher failed to start: {e}', flush=True)
 
+    from api.agent_cache_governance import start_governor_thread; start_governor_thread()  # idle-TTL + memory-pressure valves; never raises
     try:
         from api.background_process import start_drain_thread
         if start_drain_thread():

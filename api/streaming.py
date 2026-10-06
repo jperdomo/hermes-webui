@@ -11276,6 +11276,11 @@ def _run_agent_streaming(
                 if cache_signature is not None:
                     from api.config import SESSION_AGENT_CACHE, SESSION_AGENT_CACHE_LOCK
                     with SESSION_AGENT_CACHE_LOCK:
+                        # Per-entry turn lease for agent-cache governance: insertion
+                        # happens on the turn path, so the fresh entry is live; the
+                        # governor revalidates from this lease, and
+                        # unregister_active_run clears it when the turn ends.
+                        candidate._turn_active = True
                         SESSION_AGENT_CACHE[session_id] = (candidate, cache_signature)
                         SESSION_AGENT_CACHE.move_to_end(session_id)
                 if not ephemeral:
