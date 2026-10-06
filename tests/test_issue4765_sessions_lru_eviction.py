@@ -556,3 +556,86 @@ def test_content_search_scan_recovers_newer_state_db_without_lru_churn(
     assert captured["payload"]["sessions"][0]["session_id"] == stale.session_id
     assert list(SESSIONS.keys()) == order_before, "scan recovery must not promote the LRU"
     assert len(SESSIONS) == size_before, "scan recovery must not insert or evict cache entries"
+
+
+# ------------------------- byte budget (sessions_cache_max_mb) -------------------------
+
+def test_byte_budget_reads_config_yaml_key():
+    """webui.sessions_cache_max_mb is parsed; 0 disables, invalid falls back."""
+    from api import config as _cfg
+
+    default = _cfg.DEFAULT_SESSIONS_CACHE_MAX_MB
+    assert _cfg.get_sessions_cache_max_mb({"webui": {"sessions_cache_max_mb": 64}}) == 64
+    assert _cfg.get_sessions_cache_max_mb({"webui": {"sessions_cache_max_mb": 0}}) == 0
+    assert _cfg.get_sessions_cache_max_mb({"webui": {"sessions_cache_max_mb": "nope"}}) == default
+    assert _cfg.get_sessions_cache_max_mb({"webui": {"sessions_cache_max_mb": -1}}) == default
+    assert _cfg.get_sessions_cache_max_mb({"webui": {}}) == default
+    assert _cfg.get_sessions_cache_max_mb({}) == default
+
+
+def _big_session(idx, size_bytes):
+    return _make_persisted_session(
+        idx,
+        messages=[
+            {"role": "user", "content": "x" * size_bytes, "timestamp": time.time()},
+            {"role": "assistant", "content": "ok", "timestamp": time.time()},
+        ],
+    )
+
+
+def test_byte_budget_evicts_oldest_under_count_cap(isolated_session_env, monkeypatch):
+    """Large sessions are evicted by bytes even when the count cap is not reached."""
+    from api import config as _cfg
+    from api.config import SESSIONS
+
+    _cfg.SESSIONS_MAX = 100
+    monkeypatch.setattr(_cfg, "get_sessions_cache_max", lambda *a, **k: 100)
+    monkeypatch.setattr(_cfg, "get_sessions_cache_max_mb", lambda *a, **k: 1)
+
+    # Each sidecar is ~300 KB, estimated resident ~600 KB, so the 1 MiB budget
+    # holds at most one of them.
+    created = [_big_session(i, 300 * 1024) for i in range(4)]
+    for s in created:
+        _insert(s)
+
+    assert len(SESSIONS) < len(created)
+    assert created[-1].session_id in SESSIONS
+    assert created[0].session_id not in SESSIONS
+    # Eviction only drops the in-memory copy.
+    for s in created:
+        assert (isolated_session_env / f"{s.session_id}.json").exists()
+
+
+def test_byte_budget_keeps_most_recent_and_active(isolated_session_env, monkeypatch):
+    """The MRU entry and active sessions survive even when over the byte budget."""
+    from api import config as _cfg
+    from api.config import SESSIONS
+
+    _cfg.SESSIONS_MAX = 100
+    monkeypatch.setattr(_cfg, "get_sessions_cache_max", lambda *a, **k: 100)
+    monkeypatch.setattr(_cfg, "get_sessions_cache_max_mb", lambda *a, **k: 1)
+
+    active = _big_session(0, 700 * 1024)
+    active.active_stream_id = "live-stream"
+    active.pending_user_message = "in-flight"
+    active.pending_started_at = time.time()
+    _insert(active)
+    newest = _big_session(1, 700 * 1024)
+    _insert(newest)
+
+    assert active.session_id in SESSIONS
+    assert newest.session_id in SESSIONS
+
+
+def test_byte_budget_zero_disables_byte_pass(isolated_session_env, monkeypatch):
+    from api import config as _cfg
+    from api.config import SESSIONS
+
+    _cfg.SESSIONS_MAX = 100
+    monkeypatch.setattr(_cfg, "get_sessions_cache_max", lambda *a, **k: 100)
+    monkeypatch.setattr(_cfg, "get_sessions_cache_max_mb", lambda *a, **k: 0)
+
+    created = [_big_session(i, 300 * 1024) for i in range(4)]
+    for s in created:
+        _insert(s)
+    assert len(SESSIONS) == len(created)

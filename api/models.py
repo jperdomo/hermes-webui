@@ -5450,6 +5450,35 @@ def _evict_sessions_over_cap(cap: int | None = None) -> int:
         if _session_is_evictable(candidate):
             SESSIONS.pop(sid, None)
             evicted += 1
+    # Byte-budget pass: the count cap alone lets a few very large sessions
+    # coexist and dominate RSS. Evict oldest evictable entries while the
+    # estimated resident bytes exceed webui.sessions_cache_max_mb. Estimate =
+    # sidecar file size x2 (observed resident/file ratio was 1.6-1.9), statted
+    # only during this pass. Same _session_is_evictable safety gate as above.
+    try:
+        budget_mb = _cfg.get_sessions_cache_max_mb()
+    except Exception:
+        budget_mb = 0
+    if isinstance(budget_mb, int) and budget_mb > 0:
+        budget_bytes = budget_mb * 1024 * 1024
+
+        def _resident_estimate(_sid):
+            try:
+                return (SESSION_DIR / f"{_sid}.json").stat().st_size * 2
+            except OSError:
+                return 0
+
+        total_bytes = sum(_resident_estimate(s) for s in SESSIONS.keys())
+        # Never byte-evict the most recently used entry: it was just inserted
+        # or touched, and evicting it would only force an immediate reload.
+        for sid in list(SESSIONS.keys())[:-1]:
+            if total_bytes <= budget_bytes:
+                break
+            candidate = SESSIONS.get(sid)
+            if _session_is_evictable(candidate):
+                total_bytes -= _resident_estimate(sid)
+                SESSIONS.pop(sid, None)
+                evicted += 1
     if len(SESSIONS) > cap:
         logger.debug(
             "SESSIONS cache above cap (%d > %d) after eviction pass: remaining "

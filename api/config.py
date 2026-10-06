@@ -11147,6 +11147,31 @@ def get_sessions_cache_max(config_data: dict | None = None) -> int:
     return DEFAULT_SESSIONS_CACHE_MAX
 
 
+DEFAULT_SESSIONS_CACHE_MAX_MB = 512
+
+
+def get_sessions_cache_max_mb(config_data: dict | None = None) -> int:
+    """Return the SESSIONS cache byte budget in MiB.
+
+    The count cap (``get_sessions_cache_max``) alone lets a handful of large
+    sessions coexist and drive RSS up. This adds an orthogonal byte budget via
+    ``webui.sessions_cache_max_mb``; 0/negative disables the byte pass. Missing
+    or invalid falls back to ``DEFAULT_SESSIONS_CACHE_MAX_MB``.
+    """
+    active_cfg = config_data if isinstance(config_data, dict) else get_config()
+    webui_cfg = active_cfg.get("webui", {}) if isinstance(active_cfg, dict) else {}
+    if isinstance(webui_cfg, dict):
+        raw = webui_cfg.get("sessions_cache_max_mb")
+        if raw is not None:
+            try:
+                value = int(raw)
+            except (TypeError, ValueError, OverflowError):
+                value = None
+            if value is not None and value >= 0:
+                return value
+    return DEFAULT_SESSIONS_CACHE_MAX_MB
+
+
 # The cap api/models.py::_evict_sessions_over_cap() last enforced. That function
 # publishes it after its own fallback and range normalization, so a nonblocking
 # diagnostics read reports what eviction applied without re-entering config or
